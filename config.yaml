@@ -1,0 +1,30 @@
+source:
+  base_url: "https://www.myfxbook.com"
+  systems_url: "https://www.myfxbook.com/systems"
+
+browser:
+  # Attach to your already-running Brave/Chrome (launched with
+  #   brave.exe --remote-debugging-port=9222
+  # and with myfxbook Cloudflare solved once).
+  cdp_url: "http://127.0.0.1:9222"
+  accept_language: "en-US,en;q=0.9"
+  nav_timeout_ms: 60000
+  networkidle_ms: 20000
+  settle_ms: 2500
+  challenge_auto_wait_s: 25       # brief passive wait before asking you to solve
+  manual_solve_timeout_s: 180     # brief wait, then defer this system and move on
+
+collector:
+  request_delay_seconds: 14.0      # + up to 50% jitter, between navigations (slow = fewer CF checks)
+  max_pages: 0                    # 0 = crawl the whole /systems directory
+  min_recheck_hours: 12           # skip a system re-collected more recently than this
+  history_max_pages: 60           # cap on closed-trades history paging per system
+
+storage:
+  raw_dir: "./data/raw"
+  csv_dir: "./data/csv"
+  state_dir: "./data/state"
+  hdb_dir: "./data/hdb"
+
+kdb:
+  q_exe: "C:/q/w64/q.exe"
