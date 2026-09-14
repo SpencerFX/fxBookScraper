@@ -6,7 +6,9 @@
 /   snap_myfxbook         - headline snapshots          (partition: date)
 /   equity_myfxbook       - balance/equity daily curve  (partition: date)
 /   withingrowth_myfxbook - daily gain% curve           (partition: date)
-/   trade_myfxbook        - closed trades, trades.csv + losingAccounts.csv
+/   trade_myfxbook        - closed trades, trades.csv + losingAccounts.csv +
+/                           losingAccounts_reverse.csv (losing_accounts.py's
+/                           --reverse worker output, disjoint systemIds)
 /                           unioned, same 222-system bad-parse exclusion as
 /                           q/composite.q                (partition: date)
 / Uses a CUSTOM sym file (sym_myfxbook, not the default sym) via .Q.ens, so
@@ -135,9 +137,10 @@
 .mr.doTrade:{
   t1:.mr.loadTradeSrc[.mr.csv,"/trades.csv"];
   t2:.mr.loadTradeSrc[.mr.csv,"/losingAccounts.csv"];
-  t:t1,t2;
+  t3:.mr.loadTradeSrc[.mr.csv,"/losingAccounts_reverse.csv"]; / losing_accounts.py --reverse worker's own output file - fully distinct systemIds from losingAccounts.csv, not a duplicate
+  t:t1,t2,t3;
   if[0=count t; -1 "[myfxbook_r] trade: no rows"; :()];
-  t:0!(`tradeKey xkey t);          / de-dupe overlap between the two source CSVs
+  t:0!(`tradeKey xkey t);          / de-dupe overlap between the source CSVs
   t:update openTime:.mr.pTs openTime, closeTime:.mr.pTs closeTime, collectedAt:.mr.pTs collectedAt from t;
   t:update pd:`date$closeTime from t;
   t:update pd:`date$openTime from t where null pd;

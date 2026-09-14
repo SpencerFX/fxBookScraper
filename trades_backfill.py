@@ -464,8 +464,11 @@ def main(argv=None):
             print(f"[load] q exited {rc}", flush=True)
             return rc
     # non-zero so the supervisor loops back and retries the deferred systems
-    # (a later pass catches them once Cloudflare relaxes)
-    return 2 if cf_deferred else 0
+    # (a later pass catches them once Cloudflare relaxes). gaps (walk() bailing
+    # early / TradeBackfillIncomplete) need a retry just as much as a CF defer
+    # does - otherwise rc=0 declares victory while systems sit at done=false
+    # forever and the supervisor stops relaunching.
+    return 2 if (cf_deferred or gaps) else 0
 
 
 if __name__ == "__main__":
