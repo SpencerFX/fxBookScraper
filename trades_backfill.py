@@ -465,10 +465,12 @@ def main(argv=None):
             return rc
     # non-zero so the supervisor loops back and retries the deferred systems
     # (a later pass catches them once Cloudflare relaxes). gaps (walk() bailing
-    # early / TradeBackfillIncomplete) need a retry just as much as a CF defer
-    # does - otherwise rc=0 declares victory while systems sit at done=false
-    # forever and the supervisor stops relaunching.
-    return 2 if (cf_deferred or gaps) else 0
+    # early / TradeBackfillIncomplete) and generic errors (e.g. "Target page,
+    # context or browser has been closed" when the CDP tab/browser drops
+    # mid-run) need a retry just as much as a CF defer does - otherwise rc=0
+    # declares victory while systems sit at done=false forever and the
+    # supervisor stops relaunching.
+    return 2 if (cf_deferred or gaps or errors) else 0
 
 
 if __name__ == "__main__":

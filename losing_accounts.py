@@ -355,10 +355,12 @@ def main(argv=None):
           f"incomplete {gaps}, errors {errors}, cf-deferred {len(cf_deferred)}, "
           f"+{added_total} new trade rows -> {args.out}", flush=True)
     # rc 0 must mean "a real full pass with nothing left to retry" - gaps
-    # (TradeBackfillIncomplete / walk() bailing early) need another attempt
-    # just as much as a CF defer does, otherwise the supervisor loop declares
-    # victory and stops while systems are still sitting at done=false forever.
-    return 2 if (cf_deferred or gaps) else 0
+    # (TradeBackfillIncomplete / walk() bailing early) and generic errors (e.g.
+    # "Target page, context or browser has been closed" when the CDP tab/
+    # browser drops mid-run) need another attempt just as much as a CF defer
+    # does, otherwise the supervisor loop declares victory and stops while
+    # systems are still sitting at done=false forever.
+    return 2 if (cf_deferred or gaps or errors) else 0
 
 
 if __name__ == "__main__":

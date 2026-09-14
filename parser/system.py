@@ -67,6 +67,79 @@ def parse_stats(html):
     return out
 
 
+# ---------------------------------------------------------------- account/broker
+
+def parse_account_info(html):
+    """The one-line account summary near the top of a system page, e.g.
+        Real             (JPY), MYFX Markets, 1:400, MetaTrader 4
+        Real             (USD), Vantage Markets, Technical, Automated, 1:500, MetaTrader 4
+    rendered as `div.portfolio-resolve-account-type > span`, where the broker
+    name is an <a href=".../reviews/brokers/<slug>/<id>,1">. Layout is always
+    "<type> (<currency>), <broker>, [tag, tag, ...], <leverage>, <platform>"
+    but the tag list in the middle (Technical/Automated/Manual/Mixed/...) is
+    variable-length, so broker/leverage/platform are located structurally
+    (first token, a "N:N" token, last token) rather than by fixed position.
+
+    Returns None if the block isn't present on the page at all.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    box = soup.find("div", class_="portfolio-resolve-account-type")
+    if box is None:
+        return None
+    span = box.find("span") or box
+
+    tokens = []  # ("text", str) | ("broker", name, href)
+    for node in span.contents:
+        if getattr(node, "name", None) == "a":
+            tokens.append(("broker", clean_text(node.get_text(" ")), node.get("href")))
+        else:
+            for part in str(node).split(","):
+                part = clean_text(part)
+                if part:
+                    tokens.append(("text", part))
+    if not tokens:
+        return None
+
+    account_type = currency = None
+    head = tokens[0]
+    if head[0] == "text":
+        m = re.match(r"^(.*?)\s*\(([^)]*)\)\s*$", head[1])
+        account_type = clean_text(m.group(1)) if m else head[1]
+        currency = clean_text(m.group(2)) if m else None
+        tokens = tokens[1:]
+
+    broker = broker_slug = broker_id = None
+    if tokens:
+        tok = tokens[0]
+        tokens = tokens[1:]
+        broker = tok[1]
+        if tok[0] == "broker" and tok[2]:
+            bm = re.search(r"/reviews/brokers/([^/]+)/(\d+)", tok[2])
+            if bm:
+                broker_slug, broker_id = bm.group(1), bm.group(2)
+
+    rest = [t[1] for t in tokens]
+    leverage = None
+    for p in list(rest):
+        if re.match(r"^\d+\s*:\s*\d+$", p):
+            leverage = p.replace(" ", "")
+            rest.remove(p)
+            break
+    platform = rest.pop() if rest else None
+    tags = rest
+
+    return {
+        "accountType": account_type,
+        "currency": currency,
+        "broker": broker,
+        "brokerSlug": broker_slug,
+        "brokerId": broker_id,
+        "leverage": leverage,
+        "platform": platform,
+        "tags": ";".join(tags) if tags else None,
+    }
+
+
 # ------------------------------------------------------------------------- trades
 
 _TRADE_HEADER_MAP = {
