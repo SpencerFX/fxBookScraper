@@ -2,15 +2,19 @@
 / fxBookScraper - "myfxbook-suffixed" HDB at C:/data/r
 / Pure myfxbook data (no mql mixed in), named to line up with mqlScraper's
 / table names so this root can later sit alongside "*_mql" tables:
-/   sig_myfxbook          - system registry            (root splay)
+/   sig_myfxbook          - system registry + broker/brokerSlug/brokerId/
+/                           leverage/platform/tags left-joined in from
+/                           brokerages/brokerages.csv (forward+reverse
+/                           workers merged into this one file) (splay)
 /   snap_myfxbook         - headline snapshots          (partition: date)
 /   equity_myfxbook       - balance/equity daily curve  (partition: date)
-/   withingrowth_myfxbook - daily gain% curve           (partition: date)
-/   trade_myfxbook        - closed trades, trades.csv + losingAccounts.csv +
-/                           losingAccounts_reverse.csv (losing_accounts.py's
-/                           --reverse worker output, disjoint systemIds)
+/   growth_myfxbook       - daily gain% curve           (partition: date)
+/   trade_myfxbook        - closed trades: trades.csv + accounts/losingAccounts.csv
+/                           (forward+reverse workers merged into this one file)
+/                           + losingAccountsExpanded.csv (+ _2/_3/_4 shards -
+/                           4 parallel "expanded" workers, same trade schema)
 /                           unioned, same 222-system bad-parse exclusion as
-/                           q/composite.q                (partition: date)
+/                           q/composite.q (partition: date)
 / Uses a CUSTOM sym file (sym_myfxbook, not the default sym) via .Q.ens, so
 / this root can hold other sources under their own sym domain without
 / collision.
@@ -23,9 +27,12 @@
 .mr.emptySnap:0#snap;
 
 .mr.args:.Q.opt .z.x
-.mr.hdb:$[count .mr.args`hdb; first .mr.args`hdb; "C:/data/r"]
-.mr.csv:$[count .mr.args`csv; first .mr.args`csv; "data/csv"]
-.mr.excludeFile:$[count .mr.args`exclude; first .mr.args`exclude; "data/state/bad_action_systems.txt"]
+/ NB: `x in key .mr.args` (not `count .mr.args\`x`) - indexing a .Q.opt dict
+/ with an absent key returns a 1-element list holding an empty string, so
+/ `count` is always 1 and never picks the default branch.
+.mr.hdb:$[`hdb in key .mr.args; first .mr.args`hdb; "C:/data/r"]
+.mr.csv:$[`csv in key .mr.args; first .mr.args`csv; "data/csv"]
+.mr.excludeFile:$[`exclude in key .mr.args; first .mr.args`exclude; "data/state/bad_action_systems.txt"]
 .mr.root:hsym `$.mr.hdb
 .mr.symDomain:`sym_myfxbook
 
@@ -47,6 +54,7 @@
 .mr.cSnap:`ts`systemId`username`systemName`gain`absGain`daily`monthly`drawdown`balance`equity`equityPeak`profit`pips`deposits`withdrawals`interest`commissions`profitFactor`expectancyPips`trades`lots`winRatePct`avgWin`avgLoss`trackingSince`firstTradeAt`lastUpdate`broker`leverage`currency`accountType`strategyName
 .mr.cDaily:`systemId`date`balance`equity`gain`profit`pips`lots`floatingPL
 .mr.cTrade:`tradeKey`systemId`username`systemName`ticket`symbol`action`openTime`closeTime`openPrice`closePrice`sl`tp`lots`pips`profit`gainPct`durationSec`swap`commission`collectedAt
+.mr.cBrokerage:`systemId`username`systemName`url`accountType`currency`broker`brokerSlug`brokerId`leverage`platform`tags`collectedAt
 
 .mr.pTs:{
   s:23$'x;
@@ -101,10 +109,18 @@
 
 / ---- per-table processing --------------------------------------------------
 
+.mr.doBrokerage:{
+  b:.mr.readSafe[.mr.csv,"/brokerages/brokerages.csv"; .mr.cBrokerage; "JSSSSSSSJSSSS"];
+  if[0=count b; :0#b];
+  b:0!(`systemId xkey b);   / de-dupe (forward+reverse workers were merged into this one file)
+  1!select systemId,broker,brokerSlug,brokerId,leverage,platform,tags from b }
+
 .mr.doSig:{
   t:.mr.readSafe[.mr.csv,"/systems.csv"; .mr.cSys; "JSSSS**"];
   if[0=count t; :()];
   t:update firstSeen:.mr.pTs firstSeen, lastSeen:.mr.pTs lastSeen from t;
+  bk:.mr.doBrokerage[];
+  if[count bk; t:t lj bk];
   .mr.writeSplay[`sig_myfxbook; t] }
 
 .mr.doSnap:{
@@ -127,7 +143,7 @@
 .mr.doWithinGrowth:{[dt]
   if[0=count dt; :()];
   t:select systemId, date, growthPct:gain from dt;
-  .mr.writePartitioned[`withingrowth_myfxbook; t; `date] }
+  .mr.writePartitioned[`growth_myfxbook; t; `date] }
 
 .mr.loadTradeSrc:{[path]
   t:.mr.readSafe[path; .mr.cTrade; "SJSSSSS**",(8#"F"),"JFF*"];
@@ -136,9 +152,12 @@
 
 .mr.doTrade:{
   t1:.mr.loadTradeSrc[.mr.csv,"/trades.csv"];
-  t2:.mr.loadTradeSrc[.mr.csv,"/losingAccounts.csv"];
-  t3:.mr.loadTradeSrc[.mr.csv,"/losingAccounts_reverse.csv"]; / losing_accounts.py --reverse worker's own output file - fully distinct systemIds from losingAccounts.csv, not a duplicate
-  t:t1,t2,t3;
+  t2:.mr.loadTradeSrc[.mr.csv,"/accounts/losingAccounts.csv"]; / forward+reverse workers merged into this one file
+  t4:.mr.loadTradeSrc[.mr.csv,"/losingAccountsExpanded/losingAccountsExpanded.csv"];   / 4 sharded "expanded" workers, split by loss severity
+  t5:.mr.loadTradeSrc[.mr.csv,"/losingAccountsExpanded/losingAccountsExpanded_2.csv"];
+  t6:.mr.loadTradeSrc[.mr.csv,"/losingAccountsExpanded/losingAccountsExpanded_3.csv"];
+  t7:.mr.loadTradeSrc[.mr.csv,"/losingAccountsExpanded/losingAccountsExpanded_4.csv"];
+  t:t1,t2,t4,t5,t6,t7;
   if[0=count t; -1 "[myfxbook_r] trade: no rows"; :()];
   t:0!(`tradeKey xkey t);          / de-dupe overlap between the source CSVs
   t:update openTime:.mr.pTs openTime, closeTime:.mr.pTs closeTime, collectedAt:.mr.pTs collectedAt from t;
@@ -159,7 +178,7 @@ dailyT:.mr.loadDaily[];
 
 .mr.backfill[`snap_myfxbook; .mr.emptySnap];
 .mr.backfill[`equity_myfxbook; ([] systemId:`long$(); date:`date$(); balance:`float$(); equity:`float$())];
-.mr.backfill[`withingrowth_myfxbook; ([] systemId:`long$(); date:`date$(); growthPct:`float$())];
+.mr.backfill[`growth_myfxbook; ([] systemId:`long$(); date:`date$(); growthPct:`float$())];
 .mr.backfill[`trade_myfxbook; ([] tradeKey:`$(); systemId:`long$(); username:`$(); systemName:`$(); ticket:`$(); symbol:`$(); action:`$(); openTime:`timestamp$(); closeTime:`timestamp$(); openPrice:`float$(); closePrice:`float$(); sl:`float$(); tp:`float$(); lots:`float$(); pips:`float$(); profit:`float$(); gainPct:`float$(); durationSec:`long$(); swap:`float$(); commission:`float$(); collectedAt:`timestamp$())];
 
 -1 "[myfxbook_r] done. Load with:  q -> \\l ",.mr.hdb;

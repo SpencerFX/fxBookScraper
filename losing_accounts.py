@@ -19,6 +19,15 @@ Usage:
     .venv/Scripts/python.exe losing_accounts.py
     .venv/Scripts/python.exe losing_accounts.py --limit 20
     .venv/Scripts/python.exe losing_accounts.py --systems 12049087,12164483
+
+A second, independent filter (e.g. a wider drawdown/lastTraded net) gets its own
+discovery cache, progress file and output CSV so it never touches the first's:
+    .venv/Scripts/python.exe losing_accounts.py --filter-url "<url>" \\
+        --discovery losing_discovery_expanded.json --out losingAccountsExpanded.csv \\
+        --progress losing_progress_expanded.json
+Systems are processed in the order the filter URL's own sort returns them - a
+filter sorted ascending by gain (sb=19&st=1) already lists the biggest losers
+first, so the default forward walk (no --reverse) naturally starts there.
 """
 
 import argparse
@@ -68,22 +77,50 @@ def _extract_params_template(html_text):
     return None
 
 
-def discover_filtered(browser, filter_url, page_delay, on_page=None):
-    """Walk every results page of the filter. Returns list of system dicts."""
-    html_text, _ = browser.goto(filter_url)
-    systems = parse_systems_page(html_text, BASE_URL)
-    discovered = {s["system_id"]: s for s in systems}
-    total_pages = last_page_number(html_text) or 1
-    print(f"[losing] filter reports {total_pages} result pages", flush=True)
-    if on_page:
-        on_page(1, total_pages, systems)
+def _save_discovery_checkpoint(path, total_pages, tmpl, discovered, next_page):
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps({
+        "total_pages": total_pages, "tmpl": tmpl,
+        "systems": list(discovered.values()), "next_page": next_page,
+    }), encoding="utf-8")
+    tmp.replace(path)
 
-    tmpl = _extract_params_template(html_text)
+
+def discover_filtered(browser, filter_url, page_delay, on_page=None,
+                       checkpoint_path=None, resume=None):
+    """Walk every results page of the filter. Returns list of system dicts.
+
+    A large filter (hundreds of result pages) takes long enough that a hung
+    browser fetch (rare, but seen in practice - see collector.browser.fetch_text's
+    AbortController fix) losing the whole run is a real cost. If `checkpoint_path`
+    is given, progress (the paging template + systems found so far) is saved
+    every 10 pages, and `resume` (that checkpoint's parsed JSON, if the caller
+    found one on disk) restarts from `next_page` instead of page 1."""
+    if resume:
+        discovered = {s["system_id"]: s for s in resume["systems"]}
+        total_pages = resume["total_pages"]
+        tmpl = resume["tmpl"]
+        start_page = resume["next_page"]
+        print(f"[losing] resuming discovery from checkpoint: page {start_page}/"
+              f"{total_pages}, {len(discovered)} systems already found", flush=True)
+    else:
+        html_text, _ = browser.goto(filter_url)
+        systems = parse_systems_page(html_text, BASE_URL)
+        discovered = {s["system_id"]: s for s in systems}
+        total_pages = last_page_number(html_text) or 1
+        print(f"[losing] filter reports {total_pages} result pages", flush=True)
+        if on_page:
+            on_page(1, total_pages, systems)
+        tmpl = _extract_params_template(html_text)
+        start_page = 2
+        if checkpoint_path and tmpl:
+            _save_discovery_checkpoint(checkpoint_path, total_pages, tmpl, discovered, start_page)
+
     if not tmpl:
         print("[losing] no pager params found - only page 1 available", flush=True)
         return list(discovered.values())
 
-    for p in range(2, total_pages + 1):
+    for p in range(start_page, total_pages + 1):
         params = _swap_page(tmpl, p)
         status, body = browser.fetch_text("/paging.html" + params)
         if status != 200:
@@ -96,6 +133,8 @@ def discover_filtered(browser, filter_url, page_delay, on_page=None):
             discovered.setdefault(s["system_id"], s)
         if on_page:
             on_page(p, total_pages, page_systems)
+        if checkpoint_path and (p % 10 == 0 or p == total_pages):
+            _save_discovery_checkpoint(checkpoint_path, total_pages, tmpl, discovered, p + 1)
         if p % 10 == 0 or p == total_pages:
             print(f"[losing] discovery {p}/{total_pages}: "
                   f"{len(discovered)} systems so far", flush=True)
@@ -195,8 +234,31 @@ def load_config(cdp=None):
     return cfg
 
 
+def _existing_system_ids(root):
+    """systemIds already covered by the main directory crawl (systems.csv) and the
+    original narrower losing-accounts filter (losing_discovery.json) - the two
+    universes every other pipeline is already ingesting."""
+    ids = set()
+    p = root / "data" / "csv" / "systems.csv"
+    if p.exists():
+        with p.open("r", encoding="utf-8", newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    ids.add(int(r["systemId"]))
+                except (KeyError, ValueError, TypeError):
+                    pass
+    p2 = root / "data" / "state" / "losing_discovery.json"
+    if p2.exists():
+        try:
+            for r in json.loads(p2.read_text(encoding="utf-8")):
+                ids.add(int(r["system_id"]))
+        except Exception:
+            pass
+    return ids
+
+
 def run_discovery(browser, args, state_dir):
-    disc_path = state_dir / "losing_discovery.json"
+    disc_path = state_dir / args.discovery
     if disc_path.exists() and not args.rediscover:
         systems = json.loads(disc_path.read_text(encoding="utf-8"))
         print(f"[losing] using saved discovery: {len(systems)} systems "
@@ -206,9 +268,28 @@ def run_discovery(browser, args, state_dir):
     def checkpoint(page, total_pages, found):
         pass  # discover_filtered already prints progress; nothing extra to persist per-page
 
-    systems = discover_filtered(browser, args.filter_url,
-                                page_delay=args.page_delay, on_page=checkpoint)
+    ckpt_path = state_dir / (args.discovery + ".partial")
+    resume = None
+    if ckpt_path.exists() and not args.rediscover:
+        try:
+            resume = json.loads(ckpt_path.read_text(encoding="utf-8"))
+        except Exception:
+            resume = None
+
+    systems = discover_filtered(browser, args.filter_url, page_delay=args.page_delay,
+                                on_page=checkpoint, checkpoint_path=ckpt_path, resume=resume)
+    if args.exclude_existing:
+        existing = _existing_system_ids(ROOT)
+        before = len(systems)
+        systems = [s for s in systems if s["system_id"] not in existing]
+        print(f"[losing] excluded {before - len(systems)} systems already covered by "
+              f"systems.csv/losing_discovery.json - {len(systems)} new systems remain",
+              flush=True)
     disc_path.write_text(json.dumps(systems, indent=1), encoding="utf-8")
+    try:
+        ckpt_path.unlink()
+    except FileNotFoundError:
+        pass
     print(f"[losing] discovery done: {len(systems)} systems -> {disc_path.name}",
           flush=True)
     return systems
@@ -224,6 +305,17 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="ignore 'done' progress flags")
     ap.add_argument("--rediscover", action="store_true",
                     help="ignore saved discovery, re-crawl the filter results")
+    ap.add_argument("--discovery", default="losing_discovery.json",
+                    help="discovery cache filename under data/state/ (default "
+                         "losing_discovery.json) - give a different filter its own file "
+                         "so multiple filter-based pipelines don't clobber each other")
+    ap.add_argument("--exclude-existing", action="store_true",
+                    help="drop any freshly-discovered system already present in "
+                         "systems.csv or losing_discovery.json (the main directory + "
+                         "the original narrower losing filter) - use this for a new, "
+                         "wider filter so it doesn't re-ingest systems another pipeline "
+                         "already owns. Only applied on a fresh crawl, not a cached "
+                         "discovery file (use --rediscover to recompute).")
     ap.add_argument("--page-delay", type=float, default=4.0,
                     help="seconds between /paging.html fetches (default 4.0)")
     ap.add_argument("--max-pages", type=int, default=0, help="cap pages per system")
@@ -252,6 +344,7 @@ def main(argv=None):
     prog = Progress(state_dir / args.progress)
 
     cf_deferred, cf_streak = set(), 0
+    error_streak = 0
     done = ok = skipped = gaps = errors = added_total = 0
 
     with Browser(config) as browser:
@@ -297,6 +390,7 @@ def main(argv=None):
                 frag1, total = coll.first_page(sid, sysd["url"])
                 page1_trades = parse_trades_fragment(frag1) if frag1 else []
                 cf_streak = 0
+                error_streak = 0
 
                 if not frag1 or not page1_trades or (total is not None and total == 0):
                     print("      history section empty / not populated", flush=True)
@@ -322,14 +416,15 @@ def main(argv=None):
                     sid, sysd["url"], frag1, total,
                     resume_from=resume_from, max_pages=max_pages, on_page=on_page)
 
-                complete = (not total) or hi >= last_page
+                capped = bool(max_pages) and hi >= max_pages and hi < last_page
+                complete = (not total) or hi >= last_page or capped
                 prog.set(sid, populated=True, total=total or 0, pages=last_page,
-                         pages_done=hi, done=bool(complete))
+                         pages_done=hi, done=bool(complete), capped=capped)
                 ok += 1
                 if not complete:
                     gaps += 1
-                print(f"      done over {hi}/{last_page} pages"
-                      f"{'' if complete else '  (INCOMPLETE)'}", flush=True)
+                tag = "  (CAPPED)" if capped else ("" if complete else "  (INCOMPLETE)")
+                print(f"      done over {hi}/{last_page} pages{tag}", flush=True)
 
             except CloudflareBlocked as exc:
                 cf_deferred.add(str(sid))
@@ -347,9 +442,21 @@ def main(argv=None):
                 print(f"      INCOMPLETE {exc}", flush=True)
             except Exception as exc:  # noqa: BLE001
                 errors += 1
+                error_streak += 1
                 print(f"      ERROR {sid}: {exc}", flush=True)
                 if args.debug:
                     traceback.print_exc()
+                # a dead tab/browser (e.g. "Target page, context or browser has
+                # been closed") fails EVERY subsequent system for the rest of this
+                # process - each failure can cost a full nav_timeout (~60s) with
+                # zero progress, so grinding through thousands of remaining
+                # systems this way can burn hours doing nothing. Bail early so
+                # the supervisor relaunches with a fresh browser/tab instead.
+                if error_streak >= 5:
+                    print(f"[losing] {error_streak} errors in a row - likely a "
+                          f"dead browser/tab - exiting so the supervisor can "
+                          f"get a fresh one", flush=True)
+                    return 2
 
     print(f"\n[losing] processed {done}, ok {ok}, skipped(done) {skipped}, "
           f"incomplete {gaps}, errors {errors}, cf-deferred {len(cf_deferred)}, "

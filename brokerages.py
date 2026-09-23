@@ -26,6 +26,12 @@ Usage:
     .venv/Scripts/python.exe brokerages.py --systems 7043279,12137904
     .venv/Scripts/python.exe brokerages.py --limit 20
     .venv/Scripts/python.exe brokerages.py --force
+
+Two non-overlapping concurrent instances (same pattern as losing_accounts.py's
+forward/reverse split - the index slice, not run order, guarantees disjoint work):
+    .venv/Scripts/python.exe brokerages.py --slice :913
+    .venv/Scripts/python.exe brokerages.py --slice 913: --reverse \\
+        --out brokerages_reverse.csv --progress brokerages_progress_reverse.json
 """
 
 import argparse
@@ -101,6 +107,15 @@ def iter_targets(state_dir, csv_dir, args):
         return [{"system_id": int(w), "username": "_", "system_name": "_",
                  "url": f"https://www.myfxbook.com/members/_/_/{w}"} for w in want]
 
+    if getattr(args, "discovery", None):
+        # scoped to ONE filter's discovery file, in the file's own order (a filter
+        # sorted ascending by gain already lists the biggest losers first - preserve
+        # that instead of re-sorting by systemId).
+        by_id = {}
+        for r in _load_discovery_json(Path(state_dir) / args.discovery):
+            by_id.setdefault(r["system_id"], r)
+        return list(by_id.values())
+
     by_id = {}
     for r in _load_systems_csv(Path(csv_dir) / "systems.csv"):
         by_id[r["system_id"]] = r
@@ -167,10 +182,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--systems", help="comma-separated system IDs (default: systems.csv + losing_discovery.json, deduped)")
+    ap.add_argument("--discovery", help="scope the target list to ONE filter's discovery JSON under data/state/ (e.g. losing_discovery_expanded.json), in that file's own order, instead of the default systems.csv + losing_discovery.json union")
     ap.add_argument("--limit", type=int, help="process at most N systems this run")
     ap.add_argument("--force", action="store_true", help="re-fetch even if already done")
-    ap.add_argument("--slice", help="python-slice-style START:END index partition of the target list, for running concurrent instances without overlap")
+    ap.add_argument("--slice", help="python-slice-style START:END index partition of the target list (applied BEFORE --reverse), for running concurrent instances without overlap - the index slice, not run order, is what guarantees two instances never touch the same system")
     ap.add_argument("--reverse", action="store_true", help="walk the target list back-to-front")
+    ap.add_argument("--out", default="brokerages.csv", help="output CSV filename under data/csv (default brokerages.csv) - give a concurrent instance its own file")
+    ap.add_argument("--progress", default="brokerages_progress.json", help="progress checkpoint filename under data/state (default brokerages_progress.json) - give a concurrent instance its own file")
     ap.add_argument("--nav-delay", type=float, default=None, help="seconds between navigations (default config request_delay_seconds)")
     ap.add_argument("--cdp", help="DevTools URL of your running Brave")
     ap.add_argument("--debug", action="store_true")
@@ -188,8 +206,8 @@ def main(argv=None):
     csv_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    store = BrokerageStore(csv_dir / "brokerages.csv")
-    prog = Progress(state_dir / "brokerages_progress.json")
+    store = BrokerageStore(csv_dir / args.out)
+    prog = Progress(state_dir / args.progress)
 
     targets = iter_targets(state_dir, csv_dir, args)
     if args.slice:

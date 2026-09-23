@@ -204,14 +204,24 @@ class Browser:
 
     # -- same-origin fetch from the cleared page ---------------------------------
 
-    def fetch_text(self, path, method="GET", form=None, headers=None):
+    def fetch_text(self, path, method="GET", form=None, headers=None, timeout_ms=45000):
         """Run fetch() inside the current page. BEST-EFFORT: a Cloudflare block on a
         data fetch returns the 403 rather than forcing a manual solve (those fetches
         are what draw most of the extra challenges). Callers treat a block as
-        'no data for this system' and move on; navigation still solves normally."""
+        'no data for this system' and move on; navigation still solves normally.
+
+        The in-page fetch() is wrapped in an AbortController tied to `timeout_ms`,
+        and evaluate() itself is given the same budget: page.evaluate() has NO
+        default timeout in Playwright/patchright (unlike goto()/click()/etc), so a
+        network request that genuinely never settles previously hung this call -
+        and the whole process, with zero CPU used - forever. A timeout here
+        surfaces as status=0, which callers already treat as a transient failure
+        to retry/back off on."""
         js = """
-        async ({path, method, form, headers}) => {
-          const opt = {method, credentials:'include', headers: headers || {}};
+        async ({path, method, form, headers, timeoutMs}) => {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+          const opt = {method, credentials:'include', headers: headers || {}, signal: ctrl.signal};
           if (form) {
             opt.headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
             opt.headers['X-Requested-With'] = 'XMLHttpRequest';
@@ -222,9 +232,14 @@ class Browser:
             const t = await r.text();
             return {status: r.status, body: t};
           } catch (e) { return {status: 0, body: String(e)}; }
+          finally { clearTimeout(timer); }
         }"""
-        res = self._page.evaluate(js, {"path": path, "method": method,
-                                       "form": form or None, "headers": headers or None})
+        try:
+            res = self._page.evaluate(
+                js, {"path": path, "method": method, "form": form or None,
+                     "headers": headers or None, "timeoutMs": timeout_ms})
+        except Exception as exc:
+            return 0, str(exc)
         return res["status"], res["body"]
 
     def goto_json(self, url):

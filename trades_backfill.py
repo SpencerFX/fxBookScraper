@@ -339,6 +339,7 @@ def main(argv=None):
     added_total = 0
     cf_deferred = set()          # systems whose page-1 nav hit Cloudflare this run
     cf_streak = 0                # consecutive CF blocks -> bail so supervisor cools off
+    error_streak = 0             # consecutive generic errors (e.g. dead tab) -> bail too
     cf_path = state_dir / "trades_cf_deferred.json"
 
     with Browser(config) as browser:
@@ -365,6 +366,7 @@ def main(argv=None):
                 page1_trades = parse_trades_fragment(frag1) if frag1 else []
 
                 cf_streak = 0  # nav succeeded, CF isn't hard-blocking right now
+                error_streak = 0
 
                 if not frag1 or not page1_trades or (total is not None and total == 0):
                     print("      history section empty / not populated", flush=True)
@@ -445,9 +447,19 @@ def main(argv=None):
                 store.flush()
             except Exception as exc:  # noqa: BLE001
                 errors += 1
+                error_streak += 1
                 print(f"      ERROR {sid}: {exc}", flush=True)
                 if args.debug:
                     traceback.print_exc()
+                # a dead tab/browser fails EVERY subsequent system for the rest of
+                # this process, each one costing up to a full nav_timeout with zero
+                # progress - bail early so the supervisor gets a fresh browser/tab
+                # instead of grinding through the remaining targets for hours.
+                if error_streak >= 5:
+                    print(f"[trades] {error_streak} errors in a row - likely a "
+                          f"dead browser/tab - exiting so the supervisor can "
+                          f"get a fresh one", flush=True)
+                    return 2
 
         store.flush()
 

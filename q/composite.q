@@ -1,8 +1,9 @@
 / ============================================================
 / fxBookScraper + mqlScraper - composite trade table
-/ Unions myfxbook's closed-trade history (trades.csv + losingAccounts.csv) with
-/ mql5's signal trade history (../mqlScraper/data/csv/trades.csv) into one
-/ external, date-partitioned kdb+ HDB with a single `ctrade` table.
+/ Unions myfxbook's closed-trade history (trades.csv + accounts/losingAccounts.csv
+/ + the 4 losingAccountsExpanded*.csv shards - same sources as myfxbook_r.q's
+/ .mr.doTrade) with mql5's signal trade history (../mqlScraper/data/csv/trades.csv)
+/ into one external, date-partitioned kdb+ HDB with a single `ctrade` table.
 / -
 /   q q/composite.q -hdb C:/data/retail_composite -fxcsv data/csv ^
 /       -mqlcsv C:/Users/giant/Downloads/Work/Git/mqlScraper/data/csv
@@ -23,10 +24,14 @@
 ctrade:([] source:`$(); sourceId:`long$(); ckey:`$(); symbol:`$(); action:`$(); openTime:`timestamp$(); closeTime:`timestamp$(); openPrice:`float$(); closePrice:`float$(); sl:`float$(); tp:`float$(); volume:`float$(); pips:`float$(); profit:`float$(); gainPct:`float$(); durationSec:`long$(); swap:`float$(); commission:`float$(); cancelled:`boolean$(); comment:`$(); collectedAt:`timestamp$())
 
 .ct.args:.Q.opt .z.x
-.ct.hdb:$[count .ct.args`hdb; first .ct.args`hdb; "C:/data/retail_composite"]
-.ct.fxCsv:$[count .ct.args`fxcsv; first .ct.args`fxcsv; "data/csv"]
-.ct.mqlCsv:$[count .ct.args`mqlcsv; first .ct.args`mqlcsv; "C:/Users/giant/Downloads/Work/Git/mqlScraper/data/csv"]
-.ct.excludeFile:$[count .ct.args`exclude; first .ct.args`exclude; "data/state/bad_action_systems.txt"]
+/ NB: `x in key .ct.args` (not `count .ct.args\`x`) - indexing a .Q.opt dict
+/ with an absent key returns a 1-element list holding an empty string, so
+/ `count` is always 1 and never picks the default branch (same gotcha fixed
+/ in myfxbook_r.q).
+.ct.hdb:$[`hdb in key .ct.args; first .ct.args`hdb; "C:/data/retail_composite"]
+.ct.fxCsv:$[`fxcsv in key .ct.args; first .ct.args`fxcsv; "data/csv"]
+.ct.mqlCsv:$[`mqlcsv in key .ct.args; first .ct.args`mqlcsv; "C:/Users/giant/Downloads/Work/Git/mqlScraper/data/csv"]
+.ct.excludeFile:$[`exclude in key .ct.args; first .ct.args`exclude; "data/state/bad_action_systems.txt"]
 .ct.root:hsym `$.ct.hdb
 
 -1 "[composite] hdb=",.ct.hdb," fxcsv=",.ct.fxCsv," mqlcsv=",.ct.mqlCsv;
@@ -131,16 +136,21 @@ ctrade:([] source:`$(); sourceId:`long$(); ckey:`$(); symbol:`$(); action:`$(); 
 
 fx1:.ct.loadFx[.ct.fxCsv,"/trades.csv"];
 -1 "[composite] fxbook trades.csv: ",string[count fx1]," rows (post-exclude)";
-fx2:.ct.loadFx[.ct.fxCsv,"/losingAccounts.csv"];
+fx2:.ct.loadFx[.ct.fxCsv,"/accounts/losingAccounts.csv"];
 -1 "[composite] fxbook losingAccounts.csv: ",string[count fx2]," rows (post-exclude)";
+fx3:.ct.loadFx[.ct.fxCsv,"/losingAccountsExpanded/losingAccountsExpanded.csv"];    / 4 sharded "expanded" workers,
+fx4:.ct.loadFx[.ct.fxCsv,"/losingAccountsExpanded/losingAccountsExpanded_2.csv"];  / split by loss severity - same
+fx5:.ct.loadFx[.ct.fxCsv,"/losingAccountsExpanded/losingAccountsExpanded_3.csv"];  / trade schema, matches
+fx6:.ct.loadFx[.ct.fxCsv,"/losingAccountsExpanded/losingAccountsExpanded_4.csv"];  / myfxbook_r.q's .mr.doTrade sources
+-1 "[composite] fxbook losingAccountsExpanded (4 shards): ",string[count fx3,fx4,fx5,fx6]," rows (post-exclude)";
 mq:.ct.loadMql[.ct.mqlCsv];
 -1 "[composite] mql trades: ",string[count mq]," rows (kind=trade)";
 
 / NB: don't call this `all` - it shadows the q builtin `all` and top-level
 / assignment to that name throws a bare 'assign error with no useful message.
-combined:fx1,fx2,mq;
+combined:fx1,fx2,fx3,fx4,fx5,fx6,mq;
 combined:0!(`ckey xkey combined);   / de-dupe cross-source overlap (same trade, last wins)
--1 "[composite] union before dedupe: ",string[count fx1,fx2,mq],"  after dedupe: ",string[count combined];
+-1 "[composite] union before dedupe: ",string[count fx1,fx2,fx3,fx4,fx5,fx6,mq],"  after dedupe: ",string[count combined];
 
 .ct.writePartitioned[combined];
 .ct.backfill[];
