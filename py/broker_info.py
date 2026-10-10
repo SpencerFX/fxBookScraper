@@ -26,10 +26,13 @@ from pathlib import Path
 
 import yaml
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from collector.browser import Browser, CloudflareBlocked
 from parser.system import parse_account_info
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 FIELDS = ["systemId", "username", "systemName", "accountType", "currency",
           "broker", "brokerSlug", "brokerId", "leverage", "platform", "tags",

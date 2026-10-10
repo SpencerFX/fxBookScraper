@@ -44,13 +44,15 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from collector.browser import Browser, CloudflareBlocked
 from parser.directory import parse_systems_page, last_page_number
 from parser.system import parse_trades_fragment
 from normalizer.normalize import normalize_trades, TRADE_FIELDS
 from trades_backfill import TradeHistoryCollector, TradeBackfillIncomplete, _swap_page
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 BASE_URL = "https://www.myfxbook.com"
 
 DEFAULT_FILTER_URL = (
@@ -301,6 +303,13 @@ def main(argv=None):
     ap.add_argument("--filter-url", default=DEFAULT_FILTER_URL,
                     help="myfxbook /systems search URL with filter query params")
     ap.add_argument("--systems", help="comma-separated system IDs (skip discovery)")
+    ap.add_argument("--systems-file", help="file of system IDs, one per line, processed in "
+                    "file order (skip discovery) - for lists too long for the command line")
+    ap.add_argument("--dedupe-against", action="append", default=[], metavar="GLOB",
+                    help="glob under data/csv/ of existing trade CSVs (repeatable); tradeKeys "
+                         "already in them, for THIS run's systems, are never written again. "
+                         "Use when resuming past a previously-capped page range, since "
+                         "history shifts as a live system closes new trades")
     ap.add_argument("--limit", type=int, help="process at most N systems this run")
     ap.add_argument("--force", action="store_true", help="ignore 'done' progress flags")
     ap.add_argument("--rediscover", action="store_true",
@@ -350,10 +359,15 @@ def main(argv=None):
     with Browser(config) as browser:
         coll = TradeHistoryCollector(browser, config)
 
-        if args.systems:
+        if args.systems or args.systems_file:
+            if args.systems_file:
+                ids = [ln.strip() for ln in
+                       Path(args.systems_file).read_text(encoding="utf-8").splitlines()
+                       if ln.strip()]
+            else:
+                ids = [s.strip() for s in args.systems.split(",") if s.strip()]
             systems = [{"system_id": int(s), "username": "_", "system_name": "_",
-                       "url": f"{BASE_URL}/members/_/_/{s}"}
-                      for s in args.systems.split(",") if s.strip()]
+                       "url": f"{BASE_URL}/members/_/_/{s}"} for s in ids]
         else:
             systems = run_discovery(browser, args, state_dir)
 
@@ -365,6 +379,27 @@ def main(argv=None):
 
         if args.reverse:
             systems = list(reversed(systems))
+
+        if args.dedupe_against:
+            want = {str(s["system_id"]) for s in systems}
+            csv.field_size_limit(10 ** 9)
+            before = len(csv_out._keys)
+            files = sorted({p for g in args.dedupe_against
+                            for p in (ROOT / config["storage"]["csv_dir"]).glob(g)
+                            if p.resolve() != csv_out.path.resolve()})
+            for p in files:
+                with p.open("r", encoding="utf-8", newline="") as f:
+                    rd = csv.reader(f)
+                    hdr = next(rd, None)
+                    if not hdr:
+                        continue
+                    ik, isid = hdr.index("tradeKey"), hdr.index("systemId")
+                    for row in rd:
+                        if len(row) > isid and row[isid] in want:
+                            csv_out._keys.add(row[ik])
+            print(f"[losing] dedupe-against: {len(files)} files, "
+                  f"{len(csv_out._keys) - before} existing tradeKeys for these "
+                  f"{len(want)} systems", flush=True)
 
         print(f"[losing] {len(systems)} target systems"
               f"{' slice='+args.slice if args.slice else ''}"

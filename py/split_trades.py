@@ -14,7 +14,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 MASTER = ROOT / "data" / "csv" / "trades.csv"
 OUT_DIR = ROOT / "data" / "csv" / "trades"
 

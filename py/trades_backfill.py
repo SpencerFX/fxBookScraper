@@ -35,12 +35,14 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from collector.browser import Browser, CloudflareBlocked
 from parser.system import parse_trades_fragment, history_total
 from normalizer.normalize import normalize_trades
 from storage.csv_store import CsvStore
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 HISTORY_FIRST = "/systemPageGetHistoryFirstPage.json"
 PAGING = "/paging.html"

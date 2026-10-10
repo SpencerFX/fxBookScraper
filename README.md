@@ -39,9 +39,9 @@ py -3.12 -m venv .venv
 # 2. In that Brave, open https://www.myfxbook.com/systems and solve the Cloudflare check.
 
 # 3. Crawl.
-.\.venv\Scripts\python main.py --max-pages 3      # smoke test
-.\.venv\Scripts\python main.py                    # full directory (~45 pages, resumable)
-.\.venv\Scripts\python main.py --load             # crawl, then build data/hdb
+.\.venv\Scripts\python py\main.py --max-pages 3      # smoke test
+.\.venv\Scripts\python py\main.py                    # full directory (~45 pages, resumable)
+.\.venv\Scripts\python py\main.py --load             # crawl, then build data/hdb
 ```
 
 Flags: `--systems 1234,5678` (skip discovery), `--limit N`, `--force` (ignore
@@ -81,6 +81,9 @@ q).fx.bySymbol 12168354    / per-symbol P/L
 ## Layout
 
 ```
+py/         losing_accounts.py, broker_info.py, brokerages.py, trades_backfill.py,
+            main.py, split_trades.py, rebuild_v7_shards.py, probe_filter.py, probe_history.py
+sh/         run_supervised.sh + the live v8/v9 per-shard supervisor scripts
 collector/  browser.py  (CDP attach + Cloudflare wait + same-origin fetch)
             directory.py (crawl /systems/N pagination)
             system.py    (member page + /systemPageGetHistoryFirstPage.json + /private/charts.json)
@@ -89,6 +92,68 @@ normalizer/ normalize.py  (typed records + deterministic tradeKey)
 storage/    csv_store.py, state.py, raw.py
 q/          schema.q, load.q, query.q, ingest.q
 ```
+
+All entry-point scripts moved into `py/`; all shell supervisors into `sh/`.
+Both still expect to run with the repo root as the effective working
+directory - the scripts handle that themselves (`py/*.py` resolve `ROOT` as
+`Path(__file__).resolve().parent.parent` and insert the repo root onto
+`sys.path` so `collector`/`parser`/`normalizer`/`storage` keep resolving;
+`sh/*.sh` do `cd "$(dirname "$0")/.."`). Invoke them from either location:
+`sh/run_supervised.sh ...` from the repo root, or `cd sh && ./run_supervised.sh ...`.
+
+## Supervised long-running crawls
+
+Every long crawl (`losing_accounts.py`, `broker_info.py`, `brokerages.py`,
+`trades_backfill.py`) checkpoints per-system or per-page, so a Cloudflare
+block or any other nonzero exit only costs a relaunch, never lost progress.
+`sh/run_supervised.sh` is a generic retry-loop wrapper for this:
+
+```bash
+sh/run_supervised.sh <py/script.py> <log_path> [max_attempts] -- <python args...>
+```
+
+Examples (these replace what used to be ~40 near-identical one-off scripts,
+one per historical shard - the exact shard slices/system lists from past
+crawls are still in git history if ever needed again):
+
+```bash
+# losing_accounts.py - one shard of N, by index slice into the shared
+# discovery-order list (non-overlapping; --reverse walks a slice back-to-front)
+sh/run_supervised.sh py/losing_accounts.py data/state/losing_accounts_1.log -- \
+  --slice :582 --out losingAccounts_1.csv --progress losing_progress_1.json
+
+# losing_accounts.py - the "expanded" deep-history pipeline, resuming a shard
+# from its own checkpoint via --systems-file (see rebuild_v7_shards.py for how
+# the shard files themselves get rebalanced across a new shard count)
+sh/run_supervised.sh py/losing_accounts.py data/state/losing_accounts_expanded_N.log -- \
+  --systems-file data/state/v7_systems_N.txt \
+  --out losingAccountsExpanded_vNEXT/losingAccountsExpanded_vNEXT_N.csv \
+  --progress losing_progress_expanded_v7_N.json \
+  --dedupe-against 'losingAccountsExpanded*/*.csv' \
+  --dedupe-against 'losingAccountsExpanded/daily/*.csv' \
+  --cdp http://127.0.0.1:9223
+
+# broker_info.py - one shard of N, by index slice (or --systems for a
+# specific stragglers list)
+sh/run_supervised.sh py/broker_info.py data/state/broker_info_1.log -- \
+  --out brokerInfo_1.csv --progress broker_progress_1.json \
+  --slice :6320 --cdp http://127.0.0.1:9223
+
+# brokerages.py - forward half / reverse half of the same target list, into
+# separate progress/out files so neither touches the other's systems
+sh/run_supervised.sh py/brokerages.py data/state/brokerages.log -- --slice :913
+sh/run_supervised.sh py/brokerages.py data/state/brokerages_reverse.log -- \
+  --reverse --slice 913: \
+  --progress brokerages_progress_reverse.json --out brokerages_reverse.csv
+
+# trades_backfill.py - shallow-first backfill of the main trades.csv pipeline
+sh/run_supervised.sh py/trades_backfill.py data/state/trades_backfill.log 80 -- \
+  --shallow-first --page-delay 4.0
+```
+
+Run several shards in parallel by launching `sh/run_supervised.sh` once per
+shard (each with its own `--out`/`--progress`/log and a non-overlapping
+`--slice`/`--systems-file`), backgrounded with `nohup ... & disown`.
 
 ## Limits
 

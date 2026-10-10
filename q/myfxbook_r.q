@@ -2,10 +2,22 @@
 / fxBookScraper - "myfxbook-suffixed" HDB at C:/data/r
 / Pure myfxbook data (no mql mixed in), named to line up with mqlScraper's
 / table names so this root can later sit alongside "*_mql" tables:
-/   sig_myfxbook          - system registry + broker/brokerSlug/brokerId/
-/                           leverage/platform/tags left-joined in from
-/                           brokerages/brokerages.csv (forward+reverse
-/                           workers merged into this one file) (splay)
+/   sig_myfxbook          - system registry (~663 main-directory systems)
+/                           + broker/brokerSlug/brokerId/leverage/platform/
+/                           tags left-joined in from brokerage_myfxbook below
+/                           (splay)
+/   brokerage_myfxbook    - full broker/leverage/platform/currency registry,
+/                           keyed by systemId, for EVERY system either
+/                           source has seen (~27k) - brokerages/
+/                           brokerages.csv (forward+reverse workers merged
+/                           into this one file) unioned with the 4
+/                           brokerInfo_{1..4}.csv + brokerInfo_v2/brokerInfo_v2_{1..4}.csv + brokerInfo_v3/brokerInfo_v3_{1..6}.csv shards (full
+/                           losing_discovery_expanded.json sweep, 25,280
+/                           systems - brokerInfo wins on systemId overlap,
+/                           it's the newer/broader collection); join this
+/                           against trade_myfxbook by systemId to get broker
+/                           info for losing-accounts systems outside the
+/                           main directory (splay)
 /   snap_myfxbook         - headline snapshots          (partition: date)
 /   equity_myfxbook       - balance/equity daily curve  (partition: date)
 /   growth_myfxbook       - daily gain% curve           (partition: date)
@@ -55,6 +67,7 @@
 .mr.cDaily:`systemId`date`balance`equity`gain`profit`pips`lots`floatingPL
 .mr.cTrade:`tradeKey`systemId`username`systemName`ticket`symbol`action`openTime`closeTime`openPrice`closePrice`sl`tp`lots`pips`profit`gainPct`durationSec`swap`commission`collectedAt
 .mr.cBrokerage:`systemId`username`systemName`url`accountType`currency`broker`brokerSlug`brokerId`leverage`platform`tags`collectedAt
+.mr.cBrokerInfo:`systemId`username`systemName`accountType`currency`broker`brokerSlug`brokerId`leverage`platform`tags`collectedAt
 
 .mr.pTs:{
   s:23$'x;
@@ -111,9 +124,17 @@
 
 .mr.doBrokerage:{
   b:.mr.readSafe[.mr.csv,"/brokerages/brokerages.csv"; .mr.cBrokerage; "JSSSSSSSJSSSS"];
-  if[0=count b; :0#b];
-  b:0!(`systemId xkey b);   / de-dupe (forward+reverse workers were merged into this one file)
-  1!select systemId,broker,brokerSlug,brokerId,leverage,platform,tags from b }
+  bi:raze {[d;f] .mr.readSafe[d,"/",f; .mr.cBrokerInfo; "JSSSSSSJSSSS"]}[.mr.csv;] each ("brokerInfo_1.csv";"brokerInfo_2.csv";"brokerInfo_3.csv";"brokerInfo_4.csv";"brokerInfo_v2/brokerInfo_v2_1.csv";"brokerInfo_v2/brokerInfo_v2_2.csv";"brokerInfo_v2/brokerInfo_v2_3.csv";"brokerInfo_v2/brokerInfo_v2_4.csv";"brokerInfo_v3/brokerInfo_v3_1.csv";"brokerInfo_v3/brokerInfo_v3_2.csv";"brokerInfo_v3/brokerInfo_v3_3.csv";"brokerInfo_v3/brokerInfo_v3_4.csv";"brokerInfo_v3/brokerInfo_v3_5.csv";"brokerInfo_v3/brokerInfo_v3_6.csv");
+  mrg:uj[b;bi];             / uj nulls the `url` col bi lacks; bi listed second so it wins the xkey de-dupe below on systemId overlap
+  if[0=count mrg; :0#mrg];
+  mrg:0!(`systemId xkey mrg);   / de-dupe: last source wins - brokerInfo (newer, broader expanded-discovery sweep) over brokerages.csv
+  / brokerInfo's 25,280-system losing-discovery universe is far bigger than
+  / systems.csv's ~663-system main directory, so a plain lj into sig_myfxbook
+  / (below) would silently drop almost all of it - persist the full union as
+  / its own splay, keyed by systemId at query time, joinable against
+  / trade_myfxbook for any system (not just the main directory).
+  .mr.writeSplay[`brokerage_myfxbook; mrg];
+  1!select systemId,broker,brokerSlug,brokerId,leverage,platform,tags from mrg }
 
 .mr.doSig:{
   t:.mr.readSafe[.mr.csv,"/systems.csv"; .mr.cSys; "JSSSS**"];

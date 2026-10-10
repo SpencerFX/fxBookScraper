@@ -4,7 +4,10 @@ works) or needs a different parser. Uses a FRESH browser tab (new_tab=True) so i
 does not interfere with any other run already driving the shared Brave instance.
 """
 import sys
+from pathlib import Path
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from collector.browser import Browser
 

@@ -26,6 +26,8 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from collector.browser import Browser, CloudflareBlocked
 from collector.directory import DirectoryCrawler
 from collector.system import SystemCollector
@@ -37,7 +39,7 @@ from storage.csv_store import CsvStore
 from storage.raw import save_raw_bundle
 from storage.state import CrawlState
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_config(path="config.yaml"):
